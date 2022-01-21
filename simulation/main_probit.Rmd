@@ -1,0 +1,262 @@
+---
+title: "Independent and same b_eta variance"
+author: "Junting Ren"
+date: "8/31/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(splines)
+library(MASS)
+library(tidyverse)
+library(doParallel) # for parallel computing
+library(gridExtra)
+library(grid)
+library(matrixStats)
+source("../functions/output_fcns_probit.R")
+source("../functions/sim_fcns_probit.R")
+source("../functions/fcns_rf_probit.R")
+```
+
+
+
+
+# Basic hyper parameters to input
+```{r}
+save_dat = F
+# Number of b-spline density
+K =5
+K_model=10
+# Number of observations
+n = 1000
+# Number of time points for each observations
+J = 1
+
+#For test run, take smaller iterations.
+thin=1;
+nIter=2000;
+burnIn=1000;
+useCov=1;
+
+cor = 0.2
+
+mu=0;
+initNULL=0.5;
+
+constraint = F #whether to use the constraint alpha priors
+
+```
+
+
+The Bsplines we are simulating from
+```{r}
+byStep=0.01
+end = 150
+grid=seq(byStep,end+byStep,by=byStep)
+phi.mat = Bdensity_sim(K = K,byStep = byStep,end = end, degree=3)
+draw_b_spline(phi.mat, byStep = byStep)
+```
+
+# Simulate data: with prob on 1st (b_eta variance 5)
+
+
+
+```{r}
+if(J ==1){
+  sigma_b_delta = 0
+  sigma_b_eta = 0
+}else{
+  sigma_b_delta = 1.1#1.1
+  sigma_b_eta = 2#2
+  
+}
+if(cor == 0){
+  sigma_b = diag(c(sigma_b_eta^2,sigma_b_delta^2), nrow = 2)
+}else{
+  sigma_b = diag(c(sigma_b_eta^2,sigma_b_delta^2), nrow = 2)
+  sigma_b[1,2] = cor *sqrt(sigma_b_delta)*sqrt(sigma_b_eta)
+  sigma_b[2,1] = cor *sqrt(sigma_b_delta)*sqrt(sigma_b_eta)
+}
+
+# Parameters for prior prob
+gamma = c(-1,1.2,1)
+#gamma = c(-1,1.2,1)# intercept and slope
+# Parameters for K=5 density spline
+# alpha1 = c(0,0,0)
+# alpha2 = c(-3,1.2,0.7)
+# alpha3 = c(-4,0.2,1)
+# alpha4 = c(-5,1,1.5)
+# alpha5 = c(-5,-1,0.4)
+#Alpha = c(-1,0.35,0.6)
+Alpha = c(-1,1.8,1.6)
+thres = c(0,1.9,3,3.5) 
+#thres = c(0,3.5,4,4.5)
+set.seed(2021)
+list_simdata = sim_data_probit(n, J, gamma, Alpha, sigma_b, phi.mat, 
+                        x_type = c("numeric","binary"), 
+                        byStep = byStep, K =K, thres = thres,random_effect_equal = F)
+
+
+# subject_gone = sample(1:n, 5) #get rid of 5 subjects
+# b_delta = b_delta[-subject_gone]
+# b_eta = b_eta[-subject_gone,]
+# keep_ind = !(X[,length(gamma)+1] %in% subject_gone)
+# X = X[keep_ind,]
+# Z = Z[keep_ind]
+# subject_with_1_obs = sample(unique(X[,length(gamma)+1]), 10) #10 subjects with 1 observation
+# for(i in subject_with_1_obs){
+#   ind_gone = which((X[,length(gamma)+1] == i))[2:J]
+#   X = X[-ind_gone,]
+#   Z = Z[-ind_gone]
+# }
+
+Z = list_simdata$Z
+G = list_simdata$G
+X = list_simdata$X
+if(J==1){
+  dat_out = cbind(Z=Z, X)
+  colnames(dat_out)=c("Z", "x0", "x1", "x2")
+}else{
+  dat_out = cbind(Z=Z, X, G)
+  colnames(dat_out)=c("Z", "x0", "x1", "x2", "G")
+}
+hist(Z)
+(true_effect = coeff_effect_probit(quantity = NULL, Alpha, gamma, phi.mat, grid, byStep,K =K, thres = thres))
+(dist_effect = unlist(cal_quantity_probit(quantity = NULL,x = rep(1, length(gamma)), Alpha, gamma, phi.mat, grid, byStep, K, thres = thres)))
+```
+
+
+
+## Running the alogrithm
+```{r results=F, message = F}
+X=data.matrix(X)
+N=length(Z)
+if(useCov==1){
+ 	M=dim(X)[2]; #M: number of the covariates including intercept
+ 	SSA=c(5,rep(5,M-1)) #change step-size for alpha draw; length(SSA)=M 
+ 	SSAP=rep(0.5,M); # prob that step-size of alpha will be changed to SSA; length(SSAP)=M;
+ 	MA=rep(5,M); #num of multiple try for alpha; length(MA)=M;
+ }else{
+ 	M=1;
+ 	SSA=20;SSAP=0.4;MA=5;
+ }
+SSG=1# change step-size for gamma draw
+MG=3 #num of multiple try for gamma
+true_alpha = Alpha
+if(M > 3){
+  s_alpha = c(0.1, rep(0.1, M-2), 0.1)
+}else{
+  s_alpha = c(0.2, rep(0.15, M-1))
+}
+
+specify_knot = T
+quantile_z = quantile(Z[Z > 0], probs = 0.99)
+if(K_model > 8 & specify_knot ==T ){
+  # internal_knots = c(seq(byStep, quantile_z,
+  #                        length.out = (K_model)-ceiling((K_model)*0.2)),
+  #                    seq(quantile_z, max(Z),
+  #                        length.out = ceiling((K_model)*0.2+1))[-1])
+  # internal_knots = internal_knots[-length(internal_knots)]
+  # internal_knots = internal_knots[-1]
+  internal_knots = c(quantile(
+                    Z[Z!=0 & Z<quantile_z],
+                         seq(0,1,length.out = (K_model)-ceiling((K_model)*0.2))),
+                     seq(quantile_z, 150,
+                         length.out = ceiling((K_model)*0.2+1))[-1])
+  internal_knots = internal_knots[-length(internal_knots)]
+  internal_knots = internal_knots[-1]
+  # internal_knots = quantile(Z[Z!=0], seq(0,1,length.out = K_model))
+  # internal_knots = internal_knots[-1]
+  # internal_knots = internal_knots[-length(internal_knots)]
+}else{
+  specify_knot = F
+  internal_knots = NULL
+}
+
+#true_para = list(Sigma_b_eta = diag(sigma_b_eta^2, K-1), sigma_b_delta_sq = sigma_b_delta^2, b_eta = list_simdata$b_eta, Alpha = true_alpha,b_delta = list_simdata$b_delta, Gamma = gamma)
+source("../functions/Bayesian_Semi_probit.R") #B-spline with intercept
+source("../functions/Bdensity.R")
+options(error = recover)
+set.seed(2021)
+#debug(Bayesian_Semi_probit)
+MCMCfit1<-Bayesian_Semi_probit(Z,X,G,K=K_model,nIter,burnIn,thin, 
+                               useCov=useCov,  byStep=byStep,
+                               max_Z = end,c = 0.01, d = 0.01, 
+                               alpha_prior_var = 2.5, gamma_prior_var=2.5, 
+                               internal_knots =internal_knots)
+```
+
+## Convergence of the parameters
+```{r}
+MCMCfit = MCMCfit1
+convergence_plot_probit(MCMCfit, save=F) 
+```
+
+
+```{r}
+last_n = 1000
+# True parameters
+true_para = list(sigma_b_delta = sigma_b_delta, sigma_b_eta = sigma_b_eta, 
+                 alpha=Alpha, gamma = gamma, 
+                 effect_mean = true_effect$effect_mean, 
+                 effect_median = true_effect$effect_median,
+                 effect_0.25 = true_effect$effect_0.25,
+                 effect_0.75 = true_effect$effect_0.75,
+                 effect_dist = dist_effect,
+                 thres = thres)
+#Print out the table
+(parameter_est = meanCI_probit(MCMCfit1,true_para = true_para, level = 0.05,last_n = last_n ))
+```
+
+
+```{r}
+est_Alpha = parameter_est$alpha_frame$Alpha_mean
+est_thres =parameter_est$thres_frame$thres_mean
+(g = positive_sim_plot_probit(x =c(1, 0,0), Alpha, est_Alpha, phi.mat.true = phi.mat,phi.mat.model = MCMCfit$Bden_raw, byStep = byStep, 
+                  MCMCfit = MCMCfit, last_n = last_n, true_thres = thres, est_thres = est_thres))
+
+if(save_dat){
+  ggsave(filename = "./figures/plot_sim_longitudinal/population_X=1",device = "jpg",plot = g[[1]],
+         width = 6, height = 5, dpi =800)
+}
+
+```
+
+```{r}
+(g2 = positive_sim_plot_probit(x =c(1,1,0), Alpha, est_Alpha, phi.mat.true = phi.mat,phi.mat.model = MCMCfit$Bden_raw, byStep = byStep,
+                  MCMCfit = MCMCfit, last_n = last_n, true_thres = thres, est_thres = est_thres))
+ggsave(filename = "./figures/num_of_spline/population_X_1=1_K=10.jpg",device = "jpg",plot = g2[[1]],
+       width = 6, height = 5, dpi =800)
+#ggsave(filename = "../figures/population_local2",device = "jpg",plot = g2[[1]],
+#       width = 6, height = 5, dpi =800)
+```
+
+```{r}
+positive_sim_plot_probit(x =c(1,0,1), Alpha, est_Alpha, phi.mat.true = phi.mat,phi.mat.model = MCMCfit$Bden_raw, byStep = byStep,
+                  MCMCfit = MCMCfit, last_n = last_n, true_thres = thres, est_thres = est_thres)
+```
+
+
+Compare the true model for an individual (true b_eta) with the model individual (posterior mean b_eta)
+```{r}
+#G_indx = sample(1:n, 9)
+G_indx = c(225, 6, 21, 211, 592, 991,433, 469, 414 )
+(plot_individual = positive_sim_plot_probit(x =rep(1,m), Alpha, est_Alpha, phi.mat.true = phi.mat, phi.mat.model = MCMCfit$Bden_raw, byStep = byStep, G = G, MCMCfit = MCMCfit1, true_b_eta = list_simdata$b_eta, X = X,G_indx=G_indx, last_n = last_n, true_thres = thres, est_thres = est_thres))
+if(save_dat){
+  ggsave(filename = "./figures/plot_sim_longitudinal/figure_individual",device = "jpg",plot = plot_individual,width = 6, height = 5, dpi =800)
+}
+```
+
+Compare with data
+```{r}
+plot_checkfit_individual_probit(Z, X, G, model = MCMCfit1, G_indx = G_indx)
+```
+
+Saving the space
+```{r}
+if(save_dat){
+  save.image("./figures/plot_sim_longitudinal/longitudinal_r_space.Rdata")
+}
+```
+

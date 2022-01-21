@@ -1,0 +1,198 @@
+---
+title: "NCANDA data analysis random effect"
+author: "Junting Ren"
+date: "9/22/2020"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(mgcv)
+source("../functions/sim_fcns_probit.R")
+source("../functions/output_fcns_probit.R")
+source("../functions/fcns_rf_probit.R")
+```
+
+# Cleaning the data
+```{r}
+data <- read_csv("../data/NCANDA_binge_Y4_all.csv") %>% 
+  janitor::clean_names() %>% 
+  filter(!is.na(binge_past_yr)) %>% #getting rid of the missing binge observations
+  mutate(id = as.numeric(as.factor(subject))) %>% 
+  group_by(id) %>% 
+  fill(sex,  .direction =  "downup") %>%
+  fill(hi_ed, .direction = "downup") %>% # some sex are missing for observations, but not for groups
+  ungroup(id) %>% 
+  filter(!is.na(hi_ed))
+#Combine groups for race
+data = data %>% mutate(
+  race = fct_collapse(race, 
+                      Black = "African_American/Black",
+                      White = "Caucasian/White",
+                      Other = 
+                        c("Asian_Pacific_Islander","African_American_Caucasian", "Asian_White",
+                                "NativeAmerican/AmericanIndian","Asian",
+                                "NativeAmerican_Caucasian", "None", 
+                                "Pacific_Islander_Caucasian", "PacificIslander"))) %>% 
+  dplyr::select(id, binge_past_yr,  visit_age, sex, race, hi_ed) %>% 
+  mutate(age_binary = ifelse(visit_age > 16, 1, 0),
+         sex_male_binary = ifelse(sex== "M",1,0)) %>% 
+  mutate(age_standardized = scale(visit_age),
+         edu_standardized = scale(hi_ed))
+  
+```
+
+
+
+## Create dummies for categorical variable
+```{r}
+data_dummy = fastDummies::dummy_cols(data,remove_first_dummy = T) %>% dplyr::select( -sex, -race)
+```
+
+# Exploratory data analysis
+```{r}
+summary(gamm(binge_past_yr~age_standardized + edu_standardized + sex_male_binary,random=list(id=~1),data=data)$gam)
+```
+Total number of subjects
+```{r}
+length(unique(data$id))
+```
+
+Age distribution
+```{r}
+summary(data$visit_age)
+hist(data$visit_age)
+```
+
+Number of observation for each subjects
+```{r}
+data %>% group_by(id) %>% dplyr::summarise(n())
+```
+```{r}
+data %>% group_by(id) %>% dplyr::summarise(n=n()) %>% pull(n) %>% table()
+```
+
+Spaghetti plot 
+```{r}
+set.seed(2021)
+id_selected  = sample(unique(data$id), size = 400)
+(g1 = filter(data, id %in% id_selected) %>% 
+  mutate(id = as.factor(id), sex = ifelse(sex == "F", "Female", "Male")) %>% 
+  ggplot(aes(x = visit_age, y = binge_past_yr, group = id, color = id)) + 
+  facet_grid(. ~ sex)+
+  theme_bw()+
+  theme(legend.position="none")+
+  geom_line()+
+  labs(x = "Visit age", y = "Number of binge drinking episodes"))
+
+ggsave(filename = "./figures/spaghetti_plot",device = "jpg",plot = g1,
+       width = 6, height = 5, dpi =800)
+```
+
+
+
+# 1. Running the model for age as binary
+```{r}
+Z = data$binge_past_yr
+G = data$id
+X = data.matrix(cbind(intercept = 1,
+                      dplyr::select(data, age_standardized,sex_male_binary, edu_standardized)))
+
+```
+
+
+
+```{r}
+(g_hist = data %>% ggplot()+ geom_histogram(aes(x = binge_past_yr),binwidth=10,color="darkblue", fill="lightblue")+
+  theme_bw()+
+  labs(x = "Number of binge drinking episodes", y = "Count")+
+  scale_y_continuous(breaks=c(0,500, 1000, 1500,2000,2800))+
+  scale_x_continuous(breaks=c(0,50, 100, 150,180)))
+
+ggsave(filename = "./figures/data_hist",device = "jpg",plot = g_hist,
+       width = 6, height = 5, dpi =800)
+table(Z)
+```
+
+```{r results=F, message = F}
+source("../functions/Bayesian_Semi_probit.R") 
+source("../functions/Bdensity.R")
+# Number of b-spline density
+K = 10
+repara_lambda = T
+specify_knot = T
+intercept = T
+internal_knots = NULL
+quantile_z = quantile(Z[Z > 0], probs = 0.99)
+if(K_model > 8 & specify_knot ==T ){
+  internal_knots = c(quantile(
+                    Z[Z!=0 & Z<quantile_z],
+                         seq(0,1,length.out = (K)-ceiling((K)*0.2))),
+                     seq(quantile_z, max(Z),
+                         length.out = ceiling((K)*0.2+1))[-1])
+  internal_knots = internal_knots[-length(internal_knots)]
+  internal_knots = internal_knots[-1]
+}else{
+  specify_knot = F
+  internal_knots = NULL
+}
+step_thres = 0.2
+s_theta = 2 
+gamma_prior_var  = 2.5
+alpha_prior_var = 2.5
+#For test run, take smaller iterations.
+thin=1;
+nIter=8000;
+burnIn=1;
+useCov=1;
+
+SSG=3 # change step-size for gamma draw
+MG=3 #num of multiple try for gamma
+
+mu=0;
+initNULL=0.5;
+
+if(useCov==1){
+ 	M=dim(X)[2]; #M: number of the covariates including intercept
+ 	SSA=c(5,rep(8,M-3), 5, 5) #change step-size for alpha draw; length(SSA)=M 
+ 	SSAP=rep(0.8,M); # prob that step-size of alpha will be changed to SSA; length(SSAP)=M;
+ 	MA=rep(5,M); #num of multiple try for alpha; length(MA)=M;
+ }else{
+ 	M=1;
+ 	SSA=20;SSAP=0.4;MA=5;
+ }
+options(error = recover)
+set.seed(2021)
+MCMCfit<-Bayesian_Semi_probit(Z,X,G,K,nIter,burnIn,thin, useCov=useCov,  byStep=0.01,max_Z = max(Z), c = 0.01, d = 0.01, alpha_prior_var = alpha_prior_var, gamma_prior_var=gamma_prior_var,step_thres = step_thres, repara_lambda = repara_lambda,specify_knot = specify_knot, s_theta = s_theta, internal_knots = internal_knots, intercept = intercept)
+```
+
+
+## Results
+```{r}
+source("../functions/output_fcns_probit.R")
+meanCI_probit(MCMCfit ,level = 0.05, last_n = 2500)
+convergence_plot_probit(MCMCfit, save = F)
+save.image("probit_data_analysis.RData")
+```
+
+B-spline  
+```{r}
+(g2 = draw_b_spline(MCMCfit))
+ggsave(filename = "./figures/b_spline_basis_probit",device = "jpg",plot = g2[[2]],
+       width = 6, height = 5, dpi =800)
+```
+
+
+```{r}
+(g3 = plot_checkfit_average_probit(Z, X, model = MCMCfit, last_n = 2500, bin = 200))
+ggsave(filename = "./figures/data_with_model_fit_probit",device = "jpg",plot = g3[[1]],
+       width = 6, height = 5, dpi =800)
+```
+
+```{r}
+(g4 = plot_compare_2x_probit(x1 = c(1,0,0,0), x2 = c(1,3,0,0), model = MCMCfit,
+                last_n = 2500))
+ggsave(filename = "./figures/compare_data_model_probit",device = "jpg",plot = g4,
+       width = 6, height = 5, dpi =800)
+```
+

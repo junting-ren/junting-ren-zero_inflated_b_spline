@@ -1,0 +1,511 @@
+---
+title: "gen_data_b_spline"
+author: "Junting Ren"
+date: "11/4/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(splines)
+library(MASS)
+library(tidyverse)
+library(doParallel) # for parallel computing
+library(gridExtra)
+library(grid)
+library(matrixStats)
+source("../../functions/sim_fcns_probit.R")
+```
+
+
+# Generating from our model
+
+Basic hyper parameters to input
+```{r}
+write_dat =T
+read_data = T
+# Number of simulation
+n_data =500
+# Number of b-spline density
+K =10
+# Number of observations
+n = 2000
+# Number of time points for each observations
+J = 1
+# data name
+dat_name = paste("./data_b_spline/","b_spline_n_data=",n_data, "_n=", n, ".csv",sep = "")
+if(J ==1){
+  sigma_b_delta = 0
+  sigma_b_eta = 0
+}else{
+  sigma_b_delta = 1.1#1.1
+  sigma_b_eta = 2#2
+}
+sigma_b = diag(c(sigma_b_eta^2,sigma_b_delta^2), nrow = 2)
+# Parameters for prior prob
+gamma = c(1,1.2,-1)
+# Parameters for K=5 density spline
+thres = c(0,0.1,0.15,0.2, 0.22,0.25,0.3,1,1.5)
+#Alpha = c(-1,2,-2.5)
+#Alpha = c(-1,1,-1)
+Alpha = c(0.3,1,-0.5)
+```
+The Bsplines we are simulating from
+```{r}
+byStep=0.01
+end = 10
+grid=seq(byStep,end+byStep,by=byStep)
+phi.mat = Bdensity_sim(K = K,byStep = byStep,end = end, degree=3)
+draw_b_spline(phi.mat, byStep = byStep, end = end)
+```
+
+```{r}
+set.seed(2021)
+if(read_data){
+  data_out = read_csv(dat_name)
+}else{
+  data_out = data.frame()
+  for(i in 1:n_data){
+    list_simdata = sim_data_probit(n, J, gamma, Alpha, sigma_b, phi.mat, 
+                                   x_type = c("numeric","binary"), 
+                                   byStep = byStep, K =K, thres = thres)
+    
+    
+    # subject_gone = sample(1:n, 5) #get rid of 5 subjects
+    # b_delta = b_delta[-subject_gone]
+    # b_eta = b_eta[-subject_gone,]
+    # keep_ind = !(X[,length(gamma)+1] %in% subject_gone)
+    # X = X[keep_ind,]
+    # Z = Z[keep_ind]
+    # subject_with_1_obs = sample(unique(X[,length(gamma)+1]), 10) #10 subjects with 1 observation
+    # for(i in subject_with_1_obs){
+    #   ind_gone = which((X[,length(gamma)+1] == i))[2:J]
+    #   X = X[-ind_gone,]
+    #   Z = Z[-ind_gone]
+    # }
+    
+    Z = list_simdata$Z
+    G = list_simdata$G
+    X = list_simdata$X
+    if(J==1){
+      data_single = cbind(Z=Z, X, data_set = i)
+      colnames(data_single)=c("Z", "x0", "x1", "x2","num")
+    }else{
+      data_single = cbind(Z=Z, X, G, data_set = i)
+      colnames(data_single)=c("Z", "x0", "x1", "x2", "G", "num")
+    }
+    data_out = rbind(data_out, data_single)
+  }
+  
+}
+
+
+(true_effect = coeff_effect_probit(quantity = NULL, Alpha, gamma, phi.mat, grid, byStep,K =K, thres = thres))
+(dist_effect = unlist(cal_quantity_probit(quantity = NULL,x = rep(1, length(gamma)), Alpha, gamma, phi.mat, grid, byStep, K, thres = thres)))
+if(write_dat){
+  write.csv(data_out, file = dat_name)
+}
+```
+
+```{r}
+hist(data_out$Z)
+```
+```{r}
+dat_test  = data_out %>% filter(num==9) 
+Z = dat_test$Z
+X = data.matrix(dplyr::select(dat_test, x0,x1,x2))
+hist(Z)
+```
+
+
+```{r}
+K_model=K
+G = NULL
+nIter = 2000
+burnIn = 1000
+thin = 1
+byStep = 0.01
+useCov = T
+repara_lambda = F
+specify_knot = F
+internal_knots = NULL
+intercept = T
+step_thres = 0.02
+s_theta = 2 
+gamma_prior_var  = 2.5
+alpha_prior_var = 100
+source("../../functions/Bayesian_Semi_probit.R") #B-spline with intercept
+source("../../functions/output_fcns_probit.R")
+source("../../functions/sim_fcns_probit.R")
+source("../../functions/fcns_rf_probit.R")
+source("../../functions/Bdensity.R")
+MCMCfit1<-Bayesian_Semi_probit(Z,X,G,K=K_model,nIter,burnIn,thin, useCov=useCov,  byStep=byStep,max_Z = end,c = 0.01, d = 0.01, alpha_prior_var = alpha_prior_var, gamma_prior_var=gamma_prior_var, step_thres = step_thres, repara_lambda = repara_lambda,specify_knot = specify_knot, s_theta = s_theta, internal_knots = internal_knots )
+
+```
+
+```{r}
+source("../../functions/output_fcns_probit.R")
+draw_b_spline(MCMCfit1)
+```
+
+
+```{r}
+MCMCfit = MCMCfit1
+convergence_plot_probit(MCMCfit, save=F) 
+```
+
+```{r}
+last_n = 1000
+# True parameters
+true_para = true_effect
+#Print out the table
+(parameter_est = meanCI_probit(MCMCfit1,level = 0.05,true_para = true_para,last_n = last_n, return_all = F ))
+```
+
+# The simulation using B-spline model
+```{r}
+# Cores
+cl <- makeCluster(detectCores()-1)
+folder_path = "./result_b_spline/"
+dat_name = paste(folder_path, "B_spline_data_model", "n=",n,"_","K_model = ",K_model ,"_", Sys.Date(), ".RData", sep = "")
+table_name = paste(folder_path, "table_B_spline_data_model", "n=",n,"_", "K_model = ",K_model ,"_", Sys.Date(), ".csv", sep = "")
+```
+
+Simualtion html name
+```{r}
+paste("B_spline_data_model", "n=",n,"_", "K_model = ",K_model ,"_",Sys.Date(), sep = "")
+```
+
+```{r}
+check_para = list(Alpha = NULL, Gamma = NULL,
+                  effect_mean = true_effect$effect_mean, 
+                  effect_median = true_effect$effect_median,
+                  effect_0.25 = 0,
+                  effect_0.75 = true_effect$effect_0.75,
+                  effect_dist = 0)
+registerDoParallel(cl)
+cover_list_list = foreach(t=1:n_data,
+                          .errorhandling = "pass", 
+                          .inorder = F,.verbose	=T) %dopar% {
+                            list_simdata = data_out[data_out$num==t,]
+                            Z = list_simdata$Z
+                            G = list_simdata$G
+                            X = list_simdata[,c("x0", "x1", "x2")]
+                            X=data.matrix(X)
+                            N=length(Z)
+                            Bayesian_Semi_probit(Z,X,G,K=K_model,nIter,burnIn,thin, useCov=useCov,  byStep=byStep,max_Z = end,c = 0.01, d = 0.01, alpha_prior_var = alpha_prior_var, gamma_prior_var=gamma_prior_var, step_thres = step_thres, repara_lambda = repara_lambda,specify_knot = specify_knot, s_theta = s_theta, check_para = check_para, internal_knots = internal_knots, intercept = intercept )
+                          }
+
+GMN_list = lapply(cover_list_list,function(x)x$GMN)
+AMN_list = lapply(cover_list_list,function(x)x$AMN)
+thres_list = lapply(cover_list_list,function(x)x$thres_mean)
+mean_list = lapply(cover_list_list,function(x)x$effect_mean)
+median_list = lapply(cover_list_list,function(x)x$effect_median)
+perc.25_list = lapply(cover_list_list,function(x)x$effect_0.25)
+perc.75_list = lapply(cover_list_list,function(x)x$effect_0.75)
+dist_list = lapply(cover_list_list,function(x)x$effect_dist)
+AMN_cover = lapply(cover_list_list,function(x)x$cover_alpha)
+thres_cover = lapply(cover_list_list,function(x)x$cover_thres)
+GMN_cover = lapply(cover_list_list,function(x)x$cover_gamma)
+mean_cover = lapply(cover_list_list,function(x)x$cover_mean)
+median_cover = lapply(cover_list_list,function(x)x$cover_median)
+perc.25_cover = lapply(cover_list_list,function(x)x$cover_0.25)
+perc.75_cover = lapply(cover_list_list,function(x)x$cover_0.75)
+dist_cover = lapply(cover_list_list,function(x)x$cover_dist)
+sigma_delta_sq_mean_list = lapply(cover_list_list,function(x)x$sigma_delta_sq_mean)
+sigma_delta_sq_cover = lapply(cover_list_list,function(x)x$cover_sigma_delta_sq)
+Sigma_eta_mean_list = lapply(cover_list_list,function(x)x$Sigma_eta_mean)
+Sigma_eta_cover= lapply(cover_list_list,function(x)x$cover_Sigma_eta)
+
+length_before = length(mean_cover)
+if(write_dat){
+  save.image(file=dat_name)
+}
+```
+
+Filter out the null simulations
+```{r}
+GMN_list = Filter(Negate(is.null), GMN_list)
+AMN_list = Filter(Negate(is.null), AMN_list)
+thres_list = Filter(Negate(is.null), thres_list)
+AMN_cover = Filter(Negate(is.null), AMN_cover)
+thres_cover = Filter(Negate(is.null), thres_cover)
+GMN_cover = Filter(Negate(is.null), GMN_cover)
+mean_list = Filter(Negate(is.null), mean_list)
+median_list = Filter(Negate(is.null), median_list)
+perc.25_list = Filter(Negate(is.null), perc.25_list)
+perc.75_list = Filter(Negate(is.null), perc.75_list)
+dist_list = Filter(Negate(is.null), dist_list)
+mean_cover = Filter(Negate(is.null), mean_cover)
+median_cover = Filter(Negate(is.null), median_cover)
+perc.25_cover = Filter(Negate(is.null), perc.25_cover)
+perc.75_cover = Filter(Negate(is.null), perc.75_cover)
+dist_cover = Filter(Negate(is.null), dist_cover)
+sigma_delta_sq_mean_list = Filter(Negate(is.null), sigma_delta_sq_mean_list)
+sigma_delta_sq_cover = Filter(Negate(is.null), sigma_delta_sq_cover)
+Sigma_eta_mean_list = Filter(Negate(is.null), Sigma_eta_mean_list)
+Sigma_eta_cover = Filter(Negate(is.null), Sigma_eta_cover)
+
+length_after =  length(perc.75_cover)
+print("# of simulation filter out")
+length_before - length_after
+```
+
+```{r}
+#Cover rate
+print("Global mean cover rate")
+Reduce("+", mean_cover)/length(mean_cover)
+print("Global median cover rate")
+Reduce("+", median_cover)/length(median_cover)
+print("Global 0.25 perc cover rate")
+Reduce("+", perc.25_cover)/length(perc.25_cover)
+print("Global 0.75 perc cover rate")
+Reduce("+", perc.75_cover)/length(perc.75_cover)
+print("Distribution quantity cover rate:  mean   median  perc.25  perc.75 ")
+Reduce("+", dist_cover)/length(dist_cover)
+print("Alpha cover rate")
+Reduce("+", AMN_cover)/length(AMN_cover)
+print("Thres cover rate")
+Reduce("+", thres_cover)/length(thres_cover)
+print("Gamma cover rate")
+Reduce("+", GMN_cover)/length(GMN_cover)
+
+#Mean
+print("Global mean")
+Reduce("+", mean_list)/length(mean_list)
+print("Global mean true")
+check_para$effect_mean
+
+print("Global median")
+Reduce("+", median_list)/length(median_list)
+print("Global median true")
+check_para$effect_median
+
+print("Global perc 0.25")
+Reduce("+", perc.25_list)/length(perc.25_list)
+print("Global prec 0.25 true")
+check_para$effect_0.25
+
+print("Global perc 0.75")
+Reduce("+", perc.75_list)/length(perc.75_list)
+print("Global 0.75 true")
+check_para$effect_0.75
+print("Dist quantity mean")
+Reduce("+", dist_list)/length(dist_list)
+print("Distribution quantity true")
+check_para$effect_dist
+
+print("Alpha mean")
+Reduce("+", AMN_list)/length(AMN_list)
+print("True Alpha")
+check_para$Alpha
+print("Thres mean")
+Reduce("+", thres_list)/length(thres_list)
+print("True thres")
+check_para$thres
+print("Gamma mean")
+Reduce("+", GMN_list)/length(GMN_list)
+print("True Gamma")
+check_para$Gamma
+print("Sigma_delta_sq cover rate")
+mean(unlist(sigma_delta_sq_cover))
+print("Mean Sigma_delta_sq_mean")
+mean(unlist(sigma_delta_sq_mean_list))
+print("true Sigma_delta_sq")
+check_para$sigma_b_delta^2
+print("Simga_eta cover rate")
+mean(unlist(Sigma_eta_cover))
+print("Mean Simga_eta_mean")
+mean(unlist(Sigma_eta_mean_list))
+print("true Sigma_eta_square")
+check_para$Sigma_b_eta^2
+```
+
+Gamma bias
+```{r}
+Reduce("+", GMN_list)/length(GMN_list)-check_para$Gamma
+```
+
+Gamma sd
+```{r}
+sqrt(
+  Reduce("+", lapply(GMN_list, "^", 2)) / length(GMN_list) - 
+       (Reduce("+", GMN_list)/length(GMN_list))^2
+  )
+```
+
+Gamma cover rate
+```{r}
+(cover_rate_temp = Reduce("+", GMN_cover)/length(GMN_cover))
+```
+
+Gamma cover rate MC se
+```{r}
+sqrt(cover_rate_temp*(1-cover_rate_temp)/length(GMN_cover))
+```
+
+Alpha bias
+```{r}
+Reduce("+", AMN_list)/length(AMN_list)-check_para$Alpha
+```
+
+Alpha sd
+```{r}
+sqrt(
+  Reduce("+", lapply(AMN_list, "^", 2)) / length(AMN_list) - 
+       (Reduce("+", AMN_list)/length(AMN_list))^2
+  )
+```
+
+
+Alpha cover rate
+```{r}
+(cover_rate_temp = Reduce("+", AMN_cover)/length(AMN_cover))
+```
+
+Alpha cover rate MC se
+```{r}
+sqrt(cover_rate_temp*(1-cover_rate_temp)/length(AMN_cover))
+```
+
+Thres bias
+```{r}
+Reduce("+", thres_list)/length(thres_list)-check_para$thres
+```
+
+Thres sd
+```{r}
+sqrt(
+  Reduce("+", lapply(thres_list, "^", 2)) / length(thres_list) - 
+       (Reduce("+", thres_list)/length(thres_list))^2
+  )
+```
+
+Thres cover rate
+```{r}
+(cover_rate_temp = Reduce("+", thres_cover)/length(thres_cover))
+```
+
+Thres cover rate MC se
+```{r}
+sqrt(cover_rate_temp*(1-cover_rate_temp)/length(thres_cover))
+```
+
+Global random effect variance bias
+```{r}
+mean(unlist(sigma_delta_sq_mean_list))-check_para$sigma_b_delta^2
+```
+Global random effect variance sd
+```{r}
+sqrt(
+  Reduce("+", lapply(sigma_delta_sq_mean_list, "^", 2)) / length(sigma_delta_sq_mean_list) - 
+       (Reduce("+", sigma_delta_sq_mean_list)/length(sigma_delta_sq_mean_list))^2
+  )
+```
+Global random effect variance coverage rate
+```{r}
+(cover_rate_temp = mean(unlist(sigma_delta_sq_cover)))
+```
+
+Global random effect cover rate MC se
+```{r}
+sqrt(cover_rate_temp*(1-cover_rate_temp)/length(sigma_delta_sq_cover))
+```
+
+Local random effect variance bias
+```{r}
+mean(unlist(Sigma_eta_mean_list))-check_para$Sigma_b_eta^2
+```
+
+Local random effect variance sd
+```{r}
+sqrt(
+  Reduce("+", lapply(Sigma_eta_mean_list, "^", 2)) / length(Sigma_eta_mean_list) - 
+       (Reduce("+", Sigma_eta_mean_list)/length(Sigma_eta_mean_list))^2
+  )
+```
+
+Local random effect variance coverage rate
+```{r}
+(cover_rate_temp = mean(unlist(Sigma_eta_cover)))
+```
+
+Local random effect cover rate MC se
+```{r}
+sqrt(cover_rate_temp*(1-cover_rate_temp)/length(Sigma_eta_cover))
+```
+
+# Result table
+True parameters
+```{r}
+check_para
+```
+
+```{r}
+# Cover rate
+covar_mean_cover = Reduce("+", mean_cover)/length(mean_cover)
+covar_median_cover = Reduce("+", median_cover)/length(median_cover)
+covar_0.75_cover = Reduce("+", perc.75_cover)/length(perc.75_cover)
+dist_name = c("mean", "median",  "perc.25",  "perc.75")
+dist_cover1 = Reduce("+", dist_cover)/length(dist_cover)
+sigma_b_delta_cover = mean(unlist(sigma_delta_sq_cover))
+sigma_b_eta_cover = mean(unlist(Sigma_eta_cover))
+
+# Mean 
+covar_mean = Reduce("+", mean_list)/length(mean_list)
+covar_median = Reduce("+", median_list)/length(median_list)
+covar_0.75 = Reduce("+", perc.75_list)/length(perc.75_list)
+dist = Reduce("+", dist_list)/length(dist_list)
+sigma_b_delta_mean = mean(unlist(sigma_delta_sq_mean_list))
+sigma_b_eta_mean = mean(unlist(Sigma_eta_mean_list))
+# Variance 
+covar_mean_sd = apply(simplify2array(mean_list), 1:2, sd)
+covar_median_sd = apply(simplify2array(median_list), 1:2, sd)
+covar_0.75_sd = apply(simplify2array(perc.75_list), 1:2, sd)
+dist_sd = apply(simplify2array(dist_list), 1:2, sd)
+sigma_b_delta_sd = sd(unlist(sigma_delta_sq_mean_list))
+sigma_b_eta_sd = sqrt(
+  Reduce("+", lapply(Sigma_eta_mean_list, "^", 2)) / length(Sigma_eta_mean_list) - 
+       (Reduce("+", Sigma_eta_mean_list)/length(Sigma_eta_mean_list))^2
+  )
+  
+# True value
+covar_mean_true = check_para$effect_mean
+covar_median_true = check_para$effect_median
+covar_0.75_true = check_para$effect_0.75
+dist_true = check_para$effect_dist
+sigma_b_delta_true = check_para$sigma_b_delta^2
+sigma_b_eta_true = check_para$Sigma_b_eta^2
+# Bias
+covar_mean_bias = covar_mean-covar_mean_true
+covar_median_bias =covar_median - covar_median_true
+covar_0.75_bias = covar_0.75 - covar_0.75_true
+dist_bias = dist - dist_true
+sigma_b_delta_bias = sigma_b_delta_mean-sigma_b_delta_true
+sigma_b_eta_bias = sigma_b_eta_mean-sigma_b_eta_true
+# Building the table
+d = data.frame(names = c(paste(rep("mean",3), c("intercept", "X1", "X2")),
+                     paste(rep("median",3), c("intercept", "X1", "X2")),
+                     paste(rep("0.75",3), c("intercept", "X1", "X2"))),
+           bias = c(covar_mean_bias,covar_median_bias, 
+                    covar_0.75_bias),
+           sd = c(covar_mean_sd,covar_median_sd,
+                  covar_0.75_sd),
+           coverage_probability = c(
+             covar_mean_cover,covar_median_cover, 
+             covar_0.75_cover
+           ),
+           True_value = c(
+             covar_mean_true,covar_median_true,
+             covar_0.75_true
+           ),
+           mean = c(
+             covar_mean,covar_median,
+             covar_0.75
+           )) %>% 
+  mutate(MSE = bias^2+sd^2,MC_se = sqrt(coverage_probability * (1-coverage_probability)/length_after))
+knitr::kable(d)
+if(write_dat){
+  write.csv(d, file = table_name)
+}
+```

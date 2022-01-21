@@ -1,0 +1,180 @@
+---
+title: "Gamma_cover_gamma_data"
+author: "Junting Ren"
+date: "11/20/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+# Gamma data and Gamma model
+```{r}
+dat_sas = read_csv("./results_gamma/out_gamma_data.csv")
+```
+
+
+Calculate the mean,median, 0.75 for baseline 
+```{r}
+k = 0.7
+gamma = c(1,1.2,-1)
+alpha = c(0.3,1,-0.5)
+delta_coef = c(-0.3,-0.5,-0.2)
+MCMC_mean = T
+```
+
+
+Function for calculate the gamma mean
+```{r}
+cal_mean_gamma = function(mu, sigma, k){
+  exp(
+    mu+sigma*log(k^2)/k+log((gamma(1/k^2+sigma/k)))-log(gamma(1/k^2))
+  )
+}
+
+#Monte Carlo simulation to obtain the true quantiles
+cal_quantile_zero_infl_gamma = function(x, gamma, alpha,delta_coef, k, n =500000, quantiles = c(0.5, 0.75), trunc_end = Inf){
+  p = pnorm( x%*%as.vector(gamma))
+  indicator = rbinom(n, size = 1, prob = p)
+  
+  
+  k = k
+  mu = x %*% as.vector(alpha)
+  sigma = sqrt(exp(x %*% as.vector(delta_coef)))
+  delta = k/sigma
+  theta = exp(mu)/((1/k^2)^(sigma/k))
+  kappa = 1/(sigma*k)
+  
+  
+  z = c()
+  for(i in 1:n){
+    if(indicator[i]==1){
+      z[i]=rggamma(1, theta, kappa, delta)
+    }else{
+      z[i]=0
+    }
+  }
+  z = z[z < trunc_end]
+  q_v = c()
+  for(i in 1:length(quantiles)){
+    q_v[i] = quantile(z, probs = quantiles[i])
+  }
+  mean_q = mean(z)
+  return(list(quantiles_value = q_v, quantiles = quantiles, mean= mean_q))
+  
+}
+dggamma <- function(t, theta, kappa, delta, log = FALSE){
+  val <- log(delta) - kappa*log(theta) - lgamma(kappa/delta) + (kappa - 1)*log(t) -
+  (t/theta)^delta
+  if(log) return(val) else return(exp(val))
+}
+
+# GG CDF
+pggamma <- function(t, theta, kappa, delta, log.p = FALSE){
+  val <- pgamma( t^delta, shape = kappa/delta, scale = theta^delta, log.p = TRUE) 
+  if(log.p) return(val) else return(exp(val))
+}
+
+# GG Survival Function
+sggamma <- function(t, theta, kappa, delta, log.p = FALSE){
+  val <- pgamma( t^delta, shape = kappa/delta, scale = theta^delta, log.p = TRUE, lower.tail =  FALSE) 
+  if(log.p) return(val) else return(exp(val))
+}
+
+
+# GG Hazard Function
+hggamma <- function(t, theta, kappa, delta, log = FALSE){
+  val <- dggamma(t, theta, kappa, delta, log = TRUE) - sggamma(t, theta, kappa, delta, log.p = TRUE)
+  if(log) return(val) else return(exp(val))
+}
+
+# GG Cumulative Hazard Function
+chggamma <- function(t, theta, kappa, delta){
+  val <- -pgamma( t^delta, shape = kappa/delta, scale = theta^delta, log.p = TRUE, lower.tail =  FALSE) 
+  return(val) 
+}
+
+# Quantile Function
+qggamma <- function(p, theta, kappa, delta){
+  out <- qgamma(p, shape = kappa/delta, scale = theta^delta)^(1/delta)
+  return(out)
+}
+
+# Random number Generation Function
+rggamma <- function(n, theta, kappa, delta){
+  p <- runif(n)
+  out <- qgamma(p, shape = kappa/delta, scale = theta^delta)^(1/delta)
+  return(as.vector(out))
+}
+```
+
+Calculate the mean,median, 0.75 for baseline 
+```{r}
+effect_mean = c()
+effect_median = c()
+effect_75 = c()
+
+
+
+q = cal_quantile_zero_infl_gamma(x = c(1,0,0), gamma = gamma, alpha = alpha, delta_coef = delta_coef ,k = k, trunc_end = Inf)
+effect_median = c(effect_median, q$quantiles_value[1])
+effect_75 = c(effect_75,q$quantiles_value[2])
+if(!MCMC_mean){
+  mu = alpha[1]
+  sigma =sqrt(exp(delta_coef[1]/2))
+  (baseline = pnorm(gamma[1])*cal_mean_gamma(mu, sigma, k = k))
+  effect_mean = c(effect_mean, baseline)
+}else{
+  effect_mean = c(effect_mean, q$mean)
+}
+
+```
+
+Calculate the mean increase for one unit increase in x1
+```{r}
+q1 = cal_quantile_zero_infl_gamma(x = c(1,1,0), gamma = gamma, alpha = alpha, delta_coef = delta_coef ,k = k, trunc_end = Inf)
+effect_median = c(effect_median, q1$quantiles_value[1] - effect_median[1])
+effect_75 = c(effect_75,q1$quantiles_value[2] - effect_75[1])
+if(!MCMC_mean){
+  mu = alpha[1]+ alpha[2]
+  sigma =sqrt( exp((delta_coef[1]+delta_coef[2])/2))
+  (increase_x1_mean = pnorm(gamma[1]+gamma[2])*cal_mean_gamma(mu, sigma, k = k)-baseline)
+  effect_mean = c(effect_mean, increase_x1_mean)
+}else{
+  effect_mean = c(effect_mean, q1$mean - effect_mean[1])
+}
+```
+
+
+Calculate the mean increase for one unit increase in x2
+```{r}
+q2 = cal_quantile_zero_infl_gamma(x = c(1,0,1), gamma = gamma, alpha = alpha, delta_coef = delta_coef ,k = k,  trunc_end = Inf)
+effect_median = c(effect_median, q2$quantiles_value[1] - effect_median[1])
+effect_75 = c(effect_75,q2$quantiles_value[2] - effect_75[1])
+if(!MCMC_mean){
+  mu = alpha[1]+ alpha[3]
+sigma = sqrt(exp((delta_coef[1]+delta_coef[3])/2))
+(increase_x2_mean = pnorm(gamma[1]+gamma[3])*cal_mean_gamma(mu, sigma, k = k)-baseline)
+effect_mean = c(effect_mean, increase_x2_mean)
+}else{
+  effect_mean = c(effect_mean, q2$mean - effect_mean[1])
+}
+```
+
+
+## Combine datasets
+```{r}
+true_df = data.frame(Label = c("Intercept", "x1_mean_increase", "x2_mean_increase"),
+                     true_value = effect_mean)
+dat_sas %>% left_join(true_df) %>%
+  mutate(bias = Estimate  - true_value,
+         contain = true_value > Lower & true_value < Upper) %>%
+  group_by(Label) %>% 
+  dplyr::summarise(
+    bias = mean(bias),
+    sd = sd(Estimate),
+    MSE = bias^2+ sd^2,
+    cover_rate = mean(contain))
+```
+

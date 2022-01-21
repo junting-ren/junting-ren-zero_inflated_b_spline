@@ -1,0 +1,43 @@
+---
+title: "Random effect figure"
+author: "Junting Ren"
+date: "10/28/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+## Input the data from table
+```{r}
+N = c(2000,2000, 1000, 1000, 500, 500, 2000, 2000, 1000, 1000, 500, 500,2000, 2000,2000,2000,1000, 1000, 1000, 1000,500, 500, 500, 500)
+J = c(20,20, 20 ,20, 20, 20, 10, 10,10,10, 10, 10, 5,5, 5, 5,5,5,5,5, 5, 5, 5, 5)
+cor = c(0.2,0.2,0.2,0.2, 0.2, 0.2,0.2,0.2,0.2,0.2,0.2,0.2, 0.6,0.6,0.2,0.2, 0.6, 0.6,0.2,0.2, 0.6, 0.6, 0.2, 0.2)
+Part = c(1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1, 2, 1, 2,1,2,1,2)
+CR = c(0.946, 0.918, 0.947, 0.903, 0.951, 0.875,0.948, 0.902, 0.934, 0.849, 0.949, 0.835,0.95, 0.854,0.954, 0.85, 0.952, 0.8, 0.943, 0.814, 0.937, 0.774, 0.942, 0.77)
+
+re_df = as.data.frame(cbind(N, J ,cor, Part, CR)) %>% 
+  mutate( N  = as.factor(N), 
+          J = paste("J=",J, sep = "")) %>% 
+  mutate(J= if_else(cor == 0.6,paste(J, "*", sep = ""),J )) %>% 
+  mutate(J = as.factor(J)) %>% 
+  mutate(J = factor(J, levels = c("J=5*", "J=5", "J=10","J=20")),
+         Part = ifelse(Part == 1, "I", "II"))
+
+          
+```
+
+## Plotting
+```{r}
+plot_rf = (re_df %>% 
+             ggplot(aes(y = CR, x = J, color = N, linetype = Part))+
+             geom_point()+
+             geom_line(aes(group =interaction(N, Part)))+
+             ylim(0.5, 1)+
+             ylab("Coverage Rate"))
+plot_rf
+ggsave(filename = "./figures/plot_sim_longitudinal/rf_coverage.jpg",device = "jpg",plot = plot_rf,width = 6, height = 5, dpi =800)
+```
+

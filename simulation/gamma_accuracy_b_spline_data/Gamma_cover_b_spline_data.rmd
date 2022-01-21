@@ -1,0 +1,55 @@
+---
+title: "Gamma_cover_b_spline_data"
+author: "Junting Ren"
+date: "10/30/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+
+# B-spline data and Gamma model
+```{r}
+dat_sas = read_csv("./results_gamma/out_B_spline_data_n=2000.csv")
+gamma = c(1,1.2,-1)
+#gamma = c(-1,1.2,1)# intercept and slope
+# Parameters for K=5 density spline
+#Alpha = c(-1,0.35,0.6)
+K =10
+byStep=0.01
+end = 10
+# Alpha = c(-1,1.8,1.6)
+thres = c(0,0.1,0.15,0.2, 0.22,0.25,0.3,1,1.5)
+#Alpha = c(-1,2,-2.5)
+#Alpha = c(-1,1,-1)
+Alpha = c(0.3,1,-0.5)
+
+grid=seq(byStep,end+byStep,by=byStep)
+source("../../functions/Bdensity.R")
+source("../../functions/Bayesian_Semi_probit.R") #B-spline with intercept
+source("../../functions/output_fcns_probit.R")
+source("../../functions/sim_fcns_probit.R")
+source("../../functions/fcns_rf_probit.R")
+phi.mat = Bdensity_sim(K = K,byStep = byStep,end = end, degree=3)
+(true_effect = coeff_effect_probit(quantity = NULL, Alpha, gamma, phi.mat, grid, byStep,K =K, thres = thres))
+```
+
+
+## Combine datasets
+```{r}
+true_df = data.frame(Label = c("Intercept", "x1_mean_increase", "x2_mean_increase"),
+                     true_value = true_effect$effect_mean)
+dat_sas %>% left_join(true_df) %>% 
+  filter(!is.na(Estimate) & !is.na(Lower) & abs(Estimate) < 10) %>% 
+  mutate(bias = Estimate  - true_value,
+         contain = true_value > Lower & true_value < Upper) %>%
+  group_by(Label) %>% 
+  dplyr::summarise(
+    bias = mean(bias),
+    sd = sd(Estimate),
+    mse = bias^2+sd^2,
+    cover_rate = mean(contain))
+```
